@@ -225,13 +225,33 @@ def verify(path):
             st = [s for s in (v.get("/_States_") or []) if s != "/Off"]
             if len(st) > 1 and len(set(st)) != len(st):
                 problems.append(f"{k}: duplicate on-states {st}")
-    # stale `/Yes null` left in a widget's /AP/N by a failed key deletion
+    # Widget-level checks. pypdf's field view CANNOT see these: malformed radio
+    # widgets collapse into one field entry, so the headline footgun is invisible
+    # at field level and must be caught by walking the widgets themselves.
     doc = fitz.open(path)
+    toplevel = {}
     for pg in doc:
         for w in pg.widgets():
             ap = doc.xref_get_key(w.xref, "AP/N")
             if ap[0] != "null" and "null" in ap[1]:
                 problems.append(f"{w.field_name or '<kid>'}: stale null in /AP/N {ap[1]}")
+            t = doc.xref_get_key(w.xref, "T")
+            # NOTE: xref_get_key returns ('null','null') for an ABSENT key, which
+            # is the correct state for a radio kid. Only the object source can
+            # distinguish that from a literal `/T null` left by a failed deletion.
+            if re.search(r"/T\s+null", doc.xref_object(w.xref, compressed=True)):
+                problems.append(f"widget {w.xref}: /T is null — a failed key deletion, "
+                                f"not a removal (see SKILL.md)")
+            # radio/checkbox widget sitting at top level rather than under a parent
+            ff = doc.xref_get_key(w.xref, "Ff")
+            is_radio = ff[0] != "null" and (int(ff[1]) & 32768)
+            if is_radio and doc.xref_get_key(w.xref, "Parent")[0] != "xref":
+                toplevel.setdefault(t[1], []).append(w.xref)
+    for name, xrefs in toplevel.items():
+        if len(xrefs) > 1:
+            problems.append(
+                f"{name.strip('()')}: {len(xrefs)} radio widgets share a field name at TOP level "
+                f"(no /Kids parent) — they will toggle together. Use radio_group().")
     print(f"{path}\n  fields={len(f)}  DR fonts={fonts}")
     print("  PROBLEMS:\n    " + "\n    ".join(problems) if problems else "  no structural problems")
     return problems
