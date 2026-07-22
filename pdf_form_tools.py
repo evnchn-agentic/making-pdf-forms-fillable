@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Helpers for building and verifying AcroForm fillable PDFs.
 
-Deps:  uv pip install pymupdf pypdf
+Deps:  pip install "pymupdf>=1.24" "pypdf>=4"
+Note:  PyMuPDF is AGPL-3.0. This skill is MIT, but your use of PyMuPDF is not.
+
 Build with PyMuPDF, verify with pypdf — a different library is what catches
-malformed structure (see SKILL.md footgun 1).
+malformed structure (see SKILL.md).
 
 CLI:
     python pdf_form_tools.py probe   form.pdf          # what fields exist, if any
@@ -12,7 +14,11 @@ CLI:
     python pdf_form_tools.py verify  form.pdf          # second-library structural check
 """
 import sys, re
-import fitz  # PyMuPDF
+
+try:
+    import pymupdf as fitz          # preferred: the `fitz` alias collides with an
+except ImportError:                  # unrelated PyPI package named `fitz`
+    import fitz
 
 TINT = (0.898, 0.937, 1.0)  # light blue: users must be able to SEE the blanks
 
@@ -21,15 +27,20 @@ TINT = (0.898, 0.937, 1.0)  # light blue: users must be able to SEE the blanks
 # Building
 # --------------------------------------------------------------------------
 def text_field(doc, pi, name, rect, fs=10, multiline=False, tip=None,
-               align=0, maxlen=0, fill=TINT):
-    """A text field.
+               align=0, maxlen=0, fill=TINT, allow_autosize=False):
+    """A text field. Pass an explicit font size.
 
-    fs=0 (auto-size) is a TRAP: it renders BLANK for multiline+CJK and balloons
-    in tall cells. Pass an explicit size. Match the form's printed type
-    (~9pt table cells, 10-11pt normal fields).
+    fs=0 (auto-size) is refused by default. It is not merely ugly (a single
+    digit balloons to fill a tall cell) — with text mixing CJK and Latin,
+    PyMuPDF emits a degenerate text matrix and the field renders COMPLETELY
+    BLANK, single-line and multiline alike. Pass allow_autosize=True only for
+    a field you know will never receive CJK.
     """
-    if multiline and fs == 0:
-        raise ValueError("auto-size on a multiline field renders blank with CJK; pass fs>0")
+    if fs == 0 and not allow_autosize:
+        raise ValueError(
+            "auto-size (fs=0) renders BLANK for mixed CJK+Latin text and balloons "
+            "in tall cells; pass an explicit fs, or allow_autosize=True if this "
+            "field can never receive CJK")
     w = fitz.Widget()
     w.field_type = fitz.PDF_WIDGET_TYPE_TEXT
     w.field_name = name
@@ -42,7 +53,7 @@ def text_field(doc, pi, name, rect, fs=10, multiline=False, tip=None,
     if multiline:
         w.field_flags = fitz.PDF_TX_FIELD_IS_MULTILINE
     if tip:
-        w.field_label = tip
+        w.field_label = tip          # encodes UTF-16BE properly; safe for CJK
     return doc[pi].add_widget(w).xref
 
 
@@ -57,16 +68,26 @@ def checkbox(doc, pi, name, rect, tip=None, fill=TINT):
     return doc[pi].add_widget(w).xref
 
 
+def box(x0, y0, size=7.9):
+    """Widget rect for a printed checkbox glyph at (x0, y0) from geom()'s words.
+
+    Size the rect to the GLYPH, not the row. A rect as tall as the table row
+    looks fine empty, then the selected dot is drawn centred in that rect and
+    lands on top of the neighbouring label text.
+    """
+    return (x0 - 0.4, y0 + 0.4, x0 + size, y0 + size + 0.8)
+
+
 def radio_group(doc, pi, name, options, tip=None, fill=TINT):
     """A REAL radio group: picking one clears the others. Returns parent xref.
 
-    options: [("Yes", rect), ("No", rect), ...]
+    options: [("Yes", rect), ("No", rect), ...]   — build rects with box()
 
     PyMuPDF cannot do this itself. Giving two widgets the same field_name
     produces two top-level fields that BOTH use on-state /Yes, so they toggle
-    together and some parsers reject the file. The fix is the PDF-spec shape:
-    one parent field holding /Kids, each kid with its own on-state, and the
-    kids stripped of field-level keys so they are pure widgets.
+    together. The fix is the PDF-spec shape: one parent field holding /Kids,
+    each kid with its own on-state, and the kids stripped of field-level keys
+    so they are pure widgets.
     """
     kids = []
     for export, rect in options:
@@ -89,29 +110,53 @@ def radio_group(doc, pi, name, options, tip=None, fill=TINT):
             doc.update_object(xref, re.sub(r"/Yes\s+null", "", o))
         doc.xref_set_key(xref, "AS", "/Off")
 
+    # Build the parent with xref_set_key rather than string interpolation:
+    # a name or tooltip containing "(", ")" or non-ASCII would otherwise corrupt
+    # the object (mojibake) or break the PDF syntax outright.
     parent = doc.get_new_xref()
-    doc.update_object(parent,
-        "<</FT/Btn/Ff 49152/T(%s)%s/V/Off/DA(0 0 0 rg /ZaDb 0 Tf)/Kids[%s]>>"
-        % (name,
-           f"/TU({tip})" if tip else "",
-           " ".join(f"{x} 0 R" for x, _ in kids)))
+    doc.update_object(parent, "<</FT/Btn/Ff 49152/V/Off/DA(0 0 0 rg /ZaDb 0 Tf)>>")
+    doc.xref_set_key(parent, "T", f"({name})")
+    if tip:
+        doc.xref_set_key(parent, "TU", pdf_text_string(tip))
+    doc.xref_set_key(parent, "Kids", "[" + " ".join(f"{x} 0 R" for x, _ in kids) + "]")
 
     for xref, _ in kids:
         doc.xref_set_key(xref, "Parent", f"{parent} 0 R")
         # xref_set_key(..., "null") writes `/T null`, it does NOT remove the
         # key — a null /T makes the kid a broken field. Rewrite the object.
+        # /V is written by PyMuPDF as the STRING (Off), not a name, so the
+        # name-only pattern misses it and a field-level /V shadows the parent's.
         o = doc.xref_object(xref, compressed=True)
         o = re.sub(r"/T\s*\([^)]*\)", "", o)
-        o = re.sub(r"/V\s*/\w+", "", o)
+        o = re.sub(r"/V\s*(/\w+|\([^)]*\))", "", o)
         o = re.sub(r"/Ff\s*\d+", "", o)
         o = re.sub(r"/DA\s*\([^)]*\)", "", o)
         doc.update_object(xref, o)
     return parent
 
 
+def pdf_text_string(s):
+    """A PDF text string literal: ASCII stays literal, anything else becomes
+    UTF-16BE hex. Needed because raw non-ASCII interpolated into object source
+    is read back as mojibake."""
+    if all(ord(c) < 128 for c in s):
+        return "(" + s.replace("\\", r"\\").replace("(", r"\(").replace(")", r"\)") + ")"
+    return "<FEFF" + s.encode("utf-16-be").hex().upper() + ">"
+
+
 def finalize_acroform(doc, field_xrefs):
-    """Wire up the AcroForm dict. NeedAppearances + /DR fonts are what let a
-    viewer render text the DA font has no glyphs for — i.e. CJK input."""
+    """Wire up the AcroForm dict. NeedAppearances tells the VIEWER to
+    regenerate appearance streams from /DA + /DR — which is what lets a user
+    type CJK into a Helvetica field and actually see it.
+
+    Consequence worth knowing: a conforming viewer then DISCARDS the appearance
+    streams PyMuPDF generated. Anything you see in a locally-rendered PNG is
+    PyMuPDF's rendering, not the viewer's. See SKILL.md 'What the render can
+    and cannot prove'.
+
+    Note: this REPLACES any existing /AcroForm, orphaning pre-existing fields.
+    Fine for a flat PDF; don't call it blindly on a form that already has one.
+    """
     helv = doc.get_new_xref()
     doc.update_object(helv, "<</Type/Font/Subtype/Type1/BaseFont/Helvetica"
                             "/Encoding/WinAnsiEncoding>>")
@@ -144,8 +189,11 @@ def probe(path):
 def geom(path, pi):
     """Word bboxes + vector rules — the grid to place fields against.
 
+    These are PDF points, the same space as fitz.Rect, so a word bbox can be
+    used directly to position a field. (render() output is NOT: see its note.)
+
     CJK line bboxes are inflated by ascent/descent and overlap their
-    neighbours, so use these WORD boxes, then confirm against render().
+    neighbours, which is why this prints WORD boxes.
     """
     d = fitz.open(path)
     p = d[pi]
@@ -160,23 +208,34 @@ def geom(path, pi):
         print(f"  {dr['type']} ({r.x0:6.1f},{r.y0:6.1f})-({r.x1:6.1f},{r.y1:6.1f})")
 
 
-def render(path, prefix, pages=None, dpi=110):
+def render(path, prefix, pages=None, dpi=72):
+    """Render pages to PNG. dpi=72 means 1px == 1pt, so pixel coordinates you
+    measure in the image are directly usable as field rects. At any other dpi
+    multiply by 72/dpi first — mixing the two silently misplaces every field."""
     d = fitz.open(path)
     out = []
     for i in (pages if pages is not None else range(len(d))):
         fn = f"{prefix}_p{i+1}.png"
         d[i].get_pixmap(dpi=dpi).save(fn)
         out.append(fn)
-    print("\n".join(out))
+    scale = dpi / 72
+    print("\n".join(out) + f"\n  (dpi={dpi}, {scale:g}px per pt"
+          + ("" if scale == 1 else f"; multiply pixel coords by {72/dpi:.4g} for points)"))
     return out
 
 
-def fill_and_render(path, values, radios, prefix, dpi=110):
-    """THE verification step. Fill with realistic data — long strings and CJK
-    if the form is bilingual — then LOOK at every page. Blank fields,
-    ballooned type and misplaced boxes are only visible here.
+def fill_and_render(path, values, radios, prefix, dpi=72):
+    """Fill with realistic data — long strings and CJK if the form is bilingual
+    — then LOOK at every page. Catches misplaced fields, ballooned type,
+    overflow and clipping.
 
     values: {field_name: str or True}   radios: {group_name: export_value}
+    e.g.   fill_and_render("f.pdf", {"name": "陳大文 CHAN Tai Man",
+                                     "agree": True}, {"married": "Yes"}, "out")
+
+    Read the limits in SKILL.md before trusting a clean result: this renders
+    PyMuPDF's appearance streams, and a viewer honouring NeedAppearances builds
+    its own. It proves geometry, not font behaviour.
     """
     d = fitz.open(path)
     for pg in d:
@@ -206,66 +265,103 @@ def fill_and_render(path, values, radios, prefix, dpi=110):
 
 
 def verify(path):
-    """Structural check with the OTHER library. Catches what the builder missed."""
+    """Structural check with the OTHER library, plus a widget-level walk.
+
+    Never raises on a malformed or flat input — the files you most need to
+    inspect are the broken ones.
+    """
     from pypdf import PdfReader
+    problems, f = [], {}
     r = PdfReader(path)
-    f = r.get_fields() or {}
-    acro = r.trailer["/Root"]["/AcroForm"]
-    problems = []
-    if not f:
-        problems.append("no fields at all")
+    acro = r.trailer["/Root"].get("/AcroForm")
+    if acro is None:
+        print(f"{path}\n  no /AcroForm — this is a FLAT pdf, there is nothing to verify")
+        return ["no /AcroForm (flat pdf)"]
+    try:
+        f = r.get_fields() or {}
+    except Exception as e:
+        # A crash here is itself a finding: malformed field structure, e.g. a
+        # `/T null` left by a failed key deletion. Keep going — the widget walk
+        # below runs on the raw objects and will localise it.
+        problems.append(f"pypdf could not parse the field tree: {type(e).__name__}: {e}")
+    if not f and not problems:
+        problems.append("/AcroForm present but no fields")
     if not acro.get("/NeedAppearances"):
         problems.append("NeedAppearances not set (CJK input may render blank)")
-    fonts = list(acro.get("/DR", {}).get("/Font", {}).keys())
+    fonts = list((acro.get("/DR") or {}).get("/Font", {}).keys())
     for need in ("/Helv", "/ZaDb"):
         if need not in fonts:
             problems.append(f"{need} missing from /DR fonts")
-    for k, v in f.items():
-        if v.get("/FT") == "/Btn":
-            st = [s for s in (v.get("/_States_") or []) if s != "/Off"]
-            if len(st) > 1 and len(set(st)) != len(st):
-                problems.append(f"{k}: duplicate on-states {st}")
-    # Widget-level checks. pypdf's field view CANNOT see these: malformed radio
-    # widgets collapse into one field entry, so the headline footgun is invisible
-    # at field level and must be caught by walking the widgets themselves.
+
+    # Widget-level walk. pypdf's field view CANNOT see these: malformed radio
+    # widgets and duplicate names collapse into one field entry, so the
+    # headline footguns are invisible at field level.
     doc = fitz.open(path)
-    toplevel = {}
+    toplevel, names = {}, {}
     for pg in doc:
         for w in pg.widgets():
+            src = doc.xref_object(w.xref, compressed=True)
             ap = doc.xref_get_key(w.xref, "AP/N")
             if ap[0] != "null" and "null" in ap[1]:
                 problems.append(f"{w.field_name or '<kid>'}: stale null in /AP/N {ap[1]}")
-            t = doc.xref_get_key(w.xref, "T")
             # NOTE: xref_get_key returns ('null','null') for an ABSENT key, which
             # is the correct state for a radio kid. Only the object source can
             # distinguish that from a literal `/T null` left by a failed deletion.
-            if re.search(r"/T\s+null", doc.xref_object(w.xref, compressed=True)):
+            if re.search(r"/T\s+null", src):
                 problems.append(f"widget {w.xref}: /T is null — a failed key deletion, "
                                 f"not a removal (see SKILL.md)")
-            # radio/checkbox widget sitting at top level rather than under a parent
-            ff = doc.xref_get_key(w.xref, "Ff")
-            is_radio = ff[0] != "null" and (int(ff[1]) & 32768)
-            if is_radio and doc.xref_get_key(w.xref, "Parent")[0] != "xref":
+            has_parent = doc.xref_get_key(w.xref, "Parent")[0] == "xref"
+            if has_parent and re.search(r"/V\s*(/\w+|\([^)]*\))", src):
+                problems.append(f"widget {w.xref}: kid carries its own /V, which shadows "
+                                f"the parent's value")
+            da = doc.xref_get_key(w.xref, "DA")
+            # Only a TEXT field. `0 Tf` on a checkbox/radio is the normal
+            # convention — the ZapfDingbats mark scales to the box.
+            if (w.field_type_string == "Text"
+                    and da[0] != "null" and re.search(r"\b0\s+Tf", da[1])):
+                problems.append(f"{w.field_name or w.xref}: auto-size (0 Tf) — renders blank "
+                                f"for mixed CJK+Latin, balloons in tall cells")
+            ff = doc.xref_get_key(w.xref, "Ff")   # may be an indirect ref
+            is_radio = ff[0] == "int" and (int(ff[1]) & 32768)
+            t = doc.xref_get_key(w.xref, "T")
+            if not has_parent and t[0] != "null":
+                names.setdefault(t[1], []).append(w.xref)
+            if is_radio and not has_parent:
                 toplevel.setdefault(t[1], []).append(w.xref)
     for name, xrefs in toplevel.items():
         if len(xrefs) > 1:
             problems.append(
                 f"{name.strip('()')}: {len(xrefs)} radio widgets share a field name at TOP level "
                 f"(no /Kids parent) — they will toggle together. Use radio_group().")
+    for name, xrefs in names.items():
+        if len(xrefs) > 1 and name not in toplevel:
+            problems.append(f"{name.strip('()')}: {len(xrefs)} top-level widgets share this "
+                            f"field name — they will mirror each other's values")
+
     print(f"{path}\n  fields={len(f)}  DR fonts={fonts}")
-    print("  PROBLEMS:\n    " + "\n    ".join(problems) if problems else "  no structural problems")
+    print("  PROBLEMS:\n    " + "\n    ".join(problems) if problems
+          else "  no structural problems")
     return problems
 
 
+def _usage():
+    print(__doc__)
+    sys.exit(2)
+
+
 if __name__ == "__main__":
+    if len(sys.argv) < 3:
+        _usage()
     cmd, path = sys.argv[1], sys.argv[2]
     if cmd == "probe":
         probe(path)
     elif cmd == "geom":
         geom(path, int(sys.argv[3]) if len(sys.argv) > 3 else 0)
     elif cmd == "render":
+        if len(sys.argv) < 4:
+            _usage()
         render(path, sys.argv[3])
     elif cmd == "verify":
         verify(path)
     else:
-        sys.exit(__doc__)
+        _usage()
