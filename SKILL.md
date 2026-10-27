@@ -44,7 +44,7 @@ All observed in practice. Numbers 2 and 7 share one root cause: **PyMuPDF's appe
 
 | # | Footgun | Symptom | Fix |
 |---|---|---|---|
-| 1 | **PyMuPDF radio groups are malformed.** Two widgets sharing a `field_name` become two *top-level* fields both with on-state `Yes` | Clicking Yes also selects No | `radio_group()` — builds the parent `/Kids` structure the spec requires |
+| 1 | **PyMuPDF radio groups are malformed.** Two widgets sharing a `field_name` become two *top-level* fields with the same on-state (`Yes` before PyMuPDF 2.0; 2.0 names it after `field_value`, e.g. `False`) | Clicking Yes also selects No | `radio_group()` — builds the parent `/Kids` structure the spec requires and gives each kid its own on-state. Export values must be ASCII (`[A-Za-z0-9_.-]`); the group name may be CJK |
 | 2 | **Auto font size (`0 Tf`) + text mixing CJK and Latin → renders BLANK.** Degenerate text matrix (`0 0 0 0 … Tm`). **Single-line and multiline alike.** Pure-CJK and pure-ASCII happen to survive, which is exactly why it looks intermittent | Field has a value and an appearance stream, and draws nothing | Never auto-size a field that can receive CJK. `text_field` refuses `fs=0` unless you pass `allow_autosize=True` |
 | 3 | **Auto font size balloons in tall cells** | A single digit renders 30pt tall | Fixed sizes matched to the form's own type (~9pt table cells, 10–11pt fields) |
 | 4 | **CJK input needs `/NeedAppearances` + `/DR` fonts** | User types Chinese, sees nothing | `finalize_acroform()` sets both |
@@ -97,6 +97,6 @@ Not just "has fields":
 
 ## Tools
 
-`pdf_form_tools.py` — `probe` · `geom` · `render` · `verify` on the CLI; `text_field` / `checkbox` / `radio_group` / `box` / `finalize_acroform` / `fill_and_render` as imports.
+`pdf_form_tools.py` — `probe` · `geom` · `render` · `verify` on the CLI; `text_field` / `checkbox` / `radio_group` / `box` / `finalize_acroform` / `fill_and_render` as imports. `test_radio_group.py` is its self-check; run it after any PyMuPDF upgrade.
 
 Requires `pymupdf` and `pypdf`. Note **PyMuPDF is AGPL-3.0** — this skill is MIT, but that dependency is not.

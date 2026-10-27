@@ -88,26 +88,38 @@ def radio_group(doc, pi, name, options, tip=None, fill=TINT):
     together. The fix is the PDF-spec shape: one parent field holding /Kids,
     each kid with its own on-state, and the kids stripped of field-level keys
     so they are pure widgets.
+
+    Export values are PDF names and the machine-readable answer, so they are
+    limited to ASCII letters, digits and _ . - ; put the human label (CJK
+    included) in the printed text or the tooltip.
     """
-    kids = []
-    for export, rect in options:
+    kids, tmp = [], doc.xref_length()
+    for i, (export, rect) in enumerate(options):
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", export):
+            raise ValueError(f"radio export {export!r}: use only ASCII letters, digits "
+                             f"and _ . - (it becomes a PDF name)")
         w = fitz.Widget()
         w.field_type = fitz.PDF_WIDGET_TYPE_RADIOBUTTON
-        w.field_name = f"{name}__{export}"   # temporary, stripped below
+        w.field_name = f"__rg{tmp}_{i}"   # temporary and ASCII-only, stripped below
         w.rect = fitz.Rect(*rect)
         w.fill_color, w.border_width, w.field_value = fill, 0, False
         kids.append((doc[pi].add_widget(w).xref, export))
 
     for xref, export in kids:
-        on = doc.xref_get_key(xref, "AP/N/Yes")   # PyMuPDF always names it /Yes
-        if on[0] != "null" and export != "Yes":
-            doc.xref_set_key(xref, f"AP/N/{export}", on[1])
+        # PyMuPDF <2 names the on-state /Yes; 2.0 names it after field_value
+        # (/False here). Every kid gets the SAME one either way, so find it.
+        on = [s for s in re.findall(r"/(\w+)\s+\d+ 0 R", doc.xref_get_key(xref, "AP/N")[1])
+              if s != "Off"]
+        if len(on) != 1:
+            raise RuntimeError(f"radio kid {xref}: expected one on-state, got {on}")
+        if on[0] != export:
+            doc.xref_set_key(xref, f"AP/N/{export}", doc.xref_get_key(xref, f"AP/N/{on[0]}")[1])
             # Same trap as /T below: this writes `/Yes null`, it does NOT remove
             # the key. A stale on-state left in /AP/N breaks exclusivity and
             # fools any code that substring-matches the dict. Strip it for real.
-            doc.xref_set_key(xref, "AP/N/Yes", "null")
+            doc.xref_set_key(xref, f"AP/N/{on[0]}", "null")
             o = doc.xref_object(xref, compressed=True)
-            doc.update_object(xref, re.sub(r"/Yes\s+null", "", o))
+            doc.update_object(xref, re.sub(rf"/{on[0]}\s+null", "", o))
         doc.xref_set_key(xref, "AS", "/Off")
 
     # Build the parent with xref_set_key rather than string interpolation:
@@ -115,7 +127,7 @@ def radio_group(doc, pi, name, options, tip=None, fill=TINT):
     # the object (mojibake) or break the PDF syntax outright.
     parent = doc.get_new_xref()
     doc.update_object(parent, "<</FT/Btn/Ff 49152/V/Off/DA(0 0 0 rg /ZaDb 0 Tf)>>")
-    doc.xref_set_key(parent, "T", f"({name})")
+    doc.xref_set_key(parent, "T", pdf_text_string(name))
     if tip:
         doc.xref_set_key(parent, "TU", pdf_text_string(tip))
     doc.xref_set_key(parent, "Kids", "[" + " ".join(f"{x} 0 R" for x, _ in kids) + "]")
@@ -297,7 +309,7 @@ def verify(path):
     # widgets and duplicate names collapse into one field entry, so the
     # headline footguns are invisible at field level.
     doc = fitz.open(path)
-    toplevel, names = {}, {}
+    toplevel, names, radio_on = {}, {}, {}
     for pg in doc:
         for w in pg.widgets():
             src = doc.xref_object(w.xref, compressed=True)
@@ -324,6 +336,14 @@ def verify(path):
             ff = doc.xref_get_key(w.xref, "Ff")   # may be an indirect ref
             is_radio = ff[0] == "int" and (int(ff[1]) & 32768)
             t = doc.xref_get_key(w.xref, "T")
+            pff = doc.xref_get_key(w.xref, "Parent/Ff")
+            if has_parent and pff[0] == "int" and int(pff[1]) & 32768:
+                par = doc.xref_get_key(w.xref, "Parent/T")[1]
+                if t[0] != "null":
+                    problems.append(f"widget {w.xref}: radio kid of {par} carries its own /T "
+                                    f"— it becomes a separate field, not an option")
+                radio_on.setdefault(par, []).append(
+                    [s for s in re.findall(r"/(\w+)\s+\d+ 0 R", ap[1]) if s != "Off"])
             if not has_parent and t[0] != "null":
                 names.setdefault(t[1], []).append(w.xref)
             if is_radio and not has_parent:
@@ -333,6 +353,11 @@ def verify(path):
             problems.append(
                 f"{name.strip('()')}: {len(xrefs)} radio widgets share a field name at TOP level "
                 f"(no /Kids parent) — they will toggle together. Use radio_group().")
+    for name, ons in radio_on.items():
+        flat = [s for o in ons for s in o]
+        if any(len(o) != 1 for o in ons) or len(set(flat)) < len(flat):
+            problems.append(f"{name}: radio kids' on-states are {ons} — each needs exactly one, "
+                            f"all different, or the options toggle together")
     for name, xrefs in names.items():
         if len(xrefs) > 1 and name not in toplevel:
             problems.append(f"{name.strip('()')}: {len(xrefs)} top-level widgets share this "
