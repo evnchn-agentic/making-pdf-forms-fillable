@@ -108,8 +108,7 @@ def radio_group(doc, pi, name, options, tip=None, fill=TINT):
     for xref, export in kids:
         # PyMuPDF <2 names the on-state /Yes; 2.0 names it after field_value
         # (/False here). Every kid gets the SAME one either way, so find it.
-        on = [s for s in re.findall(r"/(\w+)\s+\d+ 0 R", doc.xref_get_key(xref, "AP/N")[1])
-              if s != "Off"]
+        on = on_states(doc, xref)
         if len(on) != 1:
             raise RuntimeError(f"radio kid {xref}: expected one on-state, got {on}")
         if on[0] != export:
@@ -145,6 +144,18 @@ def radio_group(doc, pi, name, options, tip=None, fill=TINT):
         o = re.sub(r"/DA\s*\([^)]*\)", "", o)
         doc.update_object(xref, o)
     return parent
+
+
+def on_states(doc, xref):
+    """A button widget's on-state names: the keys of /AP/N other than /Off.
+    Parses real names (substring-matching the dict is fooled by a stale
+    `/Yes null`) and follows an indirect /AP/N."""
+    ap = doc.xref_get_key(xref, "AP/N")
+    if ap[0] == "xref":
+        ap = ("dict", doc.xref_object(int(ap[1].split()[0]), compressed=True))
+    if ap[0] != "dict":
+        return []
+    return [s for s in re.findall(r"/([^\s/<>\[\]()%{}]+)\s*\d+ 0 R", ap[1]) if s != "Off"]
 
 
 def pdf_text_string(s):
@@ -265,12 +276,8 @@ def fill_and_render(path, values, radios, prefix, dpi=72):
                 if d.xref_get_key(px, "T")[1].strip("()") != name:
                     continue
                 d.xref_set_key(px, "V", "/" + val)
-                # Parse real on-state NAMES. Substring-matching the /AP/N dict
-                # silently matches a stale `/Yes null` and marks the wrong kid.
-                states = re.findall(r"/(\w+)\s+\d+ 0 R",
-                                    d.xref_get_key(w.xref, "AP/N")[1])
                 d.xref_set_key(w.xref, "AS",
-                               "/" + val if val in states else "/Off")
+                               "/" + val if val in on_states(d, w.xref) else "/Off")
     tmp = f"{prefix}_filled.pdf"
     d.save(tmp, garbage=3, deflate=True)
     return render(tmp, prefix, dpi=dpi)
@@ -337,13 +344,16 @@ def verify(path):
             is_radio = ff[0] == "int" and (int(ff[1]) & 32768)
             t = doc.xref_get_key(w.xref, "T")
             pff = doc.xref_get_key(w.xref, "Parent/Ff")
-            if has_parent and pff[0] == "int" and int(pff[1]) & 32768:
-                par = doc.xref_get_key(w.xref, "Parent/T")[1]
+            pff = int(pff[1]) if pff[0] == "int" else 0
+            eff = int(ff[1]) if ff[0] == "int" else pff   # /Ff is inheritable
+            if has_parent and pff & 32768 and eff & 32768:
+                px = doc.xref_get_key(w.xref, "Parent")[1]
                 if t[0] != "null":
-                    problems.append(f"widget {w.xref}: radio kid of {par} carries its own /T "
-                                    f"— it becomes a separate field, not an option")
-                radio_on.setdefault(par, []).append(
-                    [s for s in re.findall(r"/(\w+)\s+\d+ 0 R", ap[1]) if s != "Off"])
+                    problems.append(f"widget {w.xref}: radio kid of {w.field_name} carries its "
+                                    f"own /T — it becomes a separate field, not an option")
+                # RadiosInUnison (bit 26): kids sharing an on-state is intended.
+                g = radio_on.setdefault(px, [w.field_name, pff & (1 << 25), []])
+                g[2].append(on_states(doc, w.xref))
             if not has_parent and t[0] != "null":
                 names.setdefault(t[1], []).append(w.xref)
             if is_radio and not has_parent:
@@ -353,9 +363,9 @@ def verify(path):
             problems.append(
                 f"{name.strip('()')}: {len(xrefs)} radio widgets share a field name at TOP level "
                 f"(no /Kids parent) — they will toggle together. Use radio_group().")
-    for name, ons in radio_on.items():
+    for name, unison, ons in radio_on.values():
         flat = [s for o in ons for s in o]
-        if any(len(o) != 1 for o in ons) or len(set(flat)) < len(flat):
+        if any(len(o) != 1 for o in ons) or (not unison and len(set(flat)) < len(flat)):
             problems.append(f"{name}: radio kids' on-states are {ons} — each needs exactly one, "
                             f"all different, or the options toggle together")
     for name, xrefs in names.items():
