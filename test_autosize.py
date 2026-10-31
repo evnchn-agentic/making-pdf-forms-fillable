@@ -36,4 +36,10 @@ assert not autosize_flags(build("fixed20", 20)), "fs=20 flagged as auto-size"
 fn = build("dec20", 20, field_da="(0 0 0 rg /Helv 20.0 Tf)")
 assert not autosize_flags(fn), "fs=20.0 flagged as auto-size"
 
+# A decimal zero is still auto-size ("0.0 Tf", ".0 Tf").
+assert autosize_flags(build("dec0", 0, autosize=True, field_da="(0 0 0 rg /Helv 0.0 Tf)")), \
+    "fs=0.0 not flagged as auto-size"
+assert autosize_flags(build("dotzero", 0, autosize=True, field_da="(0 0 0 rg /Helv .0 Tf)")), \
+    "fs=.0 not flagged as auto-size"
+
 print("test_autosize: all passed")
