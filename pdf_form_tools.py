@@ -333,11 +333,17 @@ def verify(path):
             if has_parent and re.search(r"/V\s*(/\w+|\([^)]*\))", src):
                 problems.append(f"widget {w.xref}: kid carries its own /V, which shadows "
                                 f"the parent's value")
+            # /DA is inheritable: PyMuPDF writes it on the field dict (the
+            # widget's /Parent), so read the widget first, then the parent.
             da = doc.xref_get_key(w.xref, "DA")
+            if da[0] == "null":
+                da = doc.xref_get_key(w.xref, "Parent/DA")
             # Only a TEXT field. `0 Tf` on a checkbox/radio is the normal
             # convention — the ZapfDingbats mark scales to the box.
+            # A whole zero-valued size token: "0", "0.0", ".0" — but not the
+            # trailing 0 of "20.0", which the lookbehind rejects.
             if (w.field_type_string == "Text"
-                    and da[0] != "null" and re.search(r"\b0\s+Tf", da[1])):
+                    and da[0] != "null" and re.search(r"(?<![\d.])(?:0+\.?0*|\.0+)\s+Tf", da[1])):
                 problems.append(f"{w.field_name or w.xref}: auto-size (0 Tf) — renders blank "
                                 f"for mixed CJK+Latin, balloons in tall cells")
             ff = doc.xref_get_key(w.xref, "Ff")   # may be an indirect ref
