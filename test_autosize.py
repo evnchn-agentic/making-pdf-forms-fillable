@@ -153,4 +153,17 @@ w = doc.get_new_xref()
 doc.update_object(w, f"<</Parent {n} 0 R>>")
 assert "0 Tf" in str(t._effective_da(doc, w)), "null parent: helper raised or skipped the AcroForm default"
 
+# A widget's own auto-size DA wins over a fixed AcroForm default: the nearest /DA is the one that counts.
+tmp = tempfile.mkdtemp()
+doc = fitz.open()
+doc.new_page()
+w = t.text_field(doc, 0, "own_auto", (50, 50, 300, 80), fs=10, allow_autosize=True)
+doc.xref_set_key(w, "DA", "(0 0 0 rg /Helv 0 Tf)")
+t.finalize_acroform(doc, [w])
+acro = int(doc.xref_get_key(doc.pdf_catalog(), "AcroForm")[1].split()[0])
+doc.xref_set_key(acro, "DA", "(/Helv 10 Tf 0 g)")
+fn = os.path.join(tmp, "own_auto.pdf")
+doc.save(fn)
+assert autosize_flags(fn), "widget's own auto-size DA overridden by a fixed AcroForm default"
+
 print("test_autosize: all passed")
