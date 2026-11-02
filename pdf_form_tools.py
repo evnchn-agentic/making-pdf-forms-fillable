@@ -283,6 +283,36 @@ def fill_and_render(path, values, radios, prefix, dpi=72):
     return render(tmp, prefix, dpi=dpi)
 
 
+def _effective_da(doc, xref):
+    """The /DA a viewer applies to a widget: the nearest of the widget, its
+    ancestors, or the AcroForm default. Walks by identity, so a /Parent cycle
+    ends the walk and any acyclic depth resolves. A dangling or malformed
+    reference falls through to the AcroForm default instead of raising."""
+    def read(x, key):
+        da = doc.xref_get_key(x, key)
+        if da[0] == "xref":  # an indirect string: dereference it
+            da = ("string", doc.xref_object(int(da[1].split()[0]), compressed=True))
+        return da
+
+    seen = set()
+    while xref not in seen:
+        seen.add(xref)
+        try:
+            da = read(xref, "DA")
+            if da[0] != "null":
+                return da
+            parent = doc.xref_get_key(xref, "Parent")
+            if parent[0] != "xref":
+                break
+            xref = int(parent[1].split()[0])
+        except Exception:  # PyMuPDF's FzError* are not ValueError: any bad reference stops here
+            break
+    try:
+        return read(doc.pdf_catalog(), "AcroForm/DA")
+    except Exception:
+        return ("null", "null")
+
+
 def verify(path):
     """Structural check with the OTHER library, plus a widget-level walk.
 
@@ -334,10 +364,8 @@ def verify(path):
                 problems.append(f"widget {w.xref}: kid carries its own /V, which shadows "
                                 f"the parent's value")
             # /DA is inheritable: PyMuPDF writes it on the field dict (the
-            # widget's /Parent), so read the widget first, then the parent.
-            da = doc.xref_get_key(w.xref, "DA")
-            if da[0] == "null":
-                da = doc.xref_get_key(w.xref, "Parent/DA")
+            # widget's /Parent), and a section can hold it higher still.
+            da = _effective_da(doc, w.xref)
             # Only a TEXT field. `0 Tf` on a checkbox/radio is the normal
             # convention — the ZapfDingbats mark scales to the box.
             # A whole zero-valued size token: "0", "0.0", ".0" — but not the
