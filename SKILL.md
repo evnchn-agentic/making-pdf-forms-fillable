@@ -52,6 +52,7 @@ All observed in practice. Numbers 2 and 7 share one root cause: **PyMuPDF's appe
 | 6 | **A filled rect's extent ≠ the visible cell** | Field overruns into the next section's header bar | Read the extent off the render, not the drawing list |
 | 7 | **Fixed size + mixed CJK/Latin that overflows the field WIDTH → text renders outside the box**, clipped against a window that doesn't track the box height | Long bilingual answer bleeds into the row below | Make the field **multiline**. Enlarging the box does *not* fix it |
 | 8 | **Checkbox/radio rects sized to the row instead of the glyph** | Looks fine empty; the selected dot then lands on the neighbouring label | `box(x0, y0)` — size to the printed glyph |
+| 9 | **PyMuPDF 2.x puts a text or checkbox field on a `/Parent` of the widget**, so `add_widget().xref` is the widget, not the field. List widget xrefs in `/AcroForm /Fields` and the fields drop out of the field tree | pypdf (and any reader that walks `/Fields`) sees 1 of 3 fields; viewers that walk page widgets still show them, so it looks fine | `finalize_acroform()` lifts every xref to its root field; `verify()` flags a widget whose root is not in `/Fields` |
 
 Also: **`xref_set_key(x, k, "null")` writes `/k null`, it does not delete the key.** A `/T null` left on a radio kid makes it a broken field *and* crashes pypdf's field parser. Rewrite the object source to remove it.
 
@@ -97,6 +98,6 @@ Not just "has fields":
 
 ## Tools
 
-`pdf_form_tools.py` — `probe` · `geom` · `render` · `verify` on the CLI; `text_field` / `checkbox` / `radio_group` / `box` / `finalize_acroform` / `fill_and_render` as imports. `test_radio_group.py` is its self-check; run it after any PyMuPDF upgrade.
+`pdf_form_tools.py` — `probe` · `geom` · `render` · `verify` on the CLI; `text_field` / `checkbox` / `radio_group` / `box` / `finalize_acroform` / `fill_and_render` as imports. `test_radio_group.py`, `test_autosize.py` and `test_field_tree.py` are its self-checks; run them after any PyMuPDF upgrade.
 
 Requires `pymupdf` and `pypdf`. Note **PyMuPDF is AGPL-3.0** — this skill is MIT, but that dependency is not.
