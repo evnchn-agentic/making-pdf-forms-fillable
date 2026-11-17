@@ -1,6 +1,6 @@
 """Self-check: every field built here reaches /AcroForm /Fields.  Run:  python test_field_tree.py
 
-PyMuPDF 2.x puts a text or checkbox field on a /Parent of the widget, so a
+PyMuPDF 2.x (seen on 2.1) puts a text or checkbox field on a /Parent of the widget, so a
 /Fields array of widget xrefs hides those fields from pypdf.
 """
 import os, tempfile

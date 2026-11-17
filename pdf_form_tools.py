@@ -381,7 +381,7 @@ def verify(path):
             src = doc.xref_object(w.xref, compressed=True)
             if _field_root(doc, w.xref) not in roots:
                 problems.append(f"{w.field_name or w.xref}: its root field is not in /AcroForm "
-                                f"/Fields — invisible to pypdf and other field-tree readers")
+                                f"/Fields — pypdf's field tree cannot see it")
             ap = doc.xref_get_key(w.xref, "AP/N")
             if ap[0] != "null" and "null" in ap[1]:
                 problems.append(f"{w.field_name or '<kid>'}: stale null in /AP/N {ap[1]}")
