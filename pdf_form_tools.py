@@ -167,6 +167,23 @@ def pdf_text_string(s):
     return "<FEFF" + s.encode("utf-16-be").hex().upper() + ">"
 
 
+def _field_root(doc, xref):
+    """The top of a widget's /Parent chain: the object /AcroForm /Fields must list.
+    A cycle or a dangling /Parent stops the walk at the last good object."""
+    seen = set()
+    while xref not in seen:
+        seen.add(xref)
+        try:
+            p = doc.xref_get_key(xref, "Parent")
+            nxt = int(p[1].split()[0]) if p[0] == "xref" else None
+            if nxt is None or doc.xref_object(nxt) == "null":
+                break
+        except Exception:  # PyMuPDF raises on an xref that does not exist
+            break
+        xref = nxt
+    return xref
+
+
 def finalize_acroform(doc, field_xrefs):
     """Wire up the AcroForm dict. NeedAppearances tells the VIEWER to
     regenerate appearance streams from /DA + /DR — which is what lets a user
@@ -179,7 +196,12 @@ def finalize_acroform(doc, field_xrefs):
 
     Note: this REPLACES any existing /AcroForm, orphaning pre-existing fields.
     Fine for a flat PDF; don't call it blindly on a form that already has one.
+
+    field_xrefs may be widget xrefs: each is lifted to its root field, because
+    PyMuPDF 2.x hangs the field (/T, /FT, /V) on a /Parent of the widget, and a
+    widget listed in /Fields is invisible to pypdf and other field-tree readers.
     """
+    field_xrefs = list(dict.fromkeys(_field_root(doc, x) for x in field_xrefs))
     helv = doc.get_new_xref()
     doc.update_object(helv, "<</Type/Font/Subtype/Type1/BaseFont/Helvetica"
                             "/Encoding/WinAnsiEncoding>>")
@@ -346,10 +368,20 @@ def verify(path):
     # widgets and duplicate names collapse into one field entry, so the
     # headline footguns are invisible at field level.
     doc = fitz.open(path)
+    try:
+        fa = doc.xref_get_key(doc.pdf_catalog(), "AcroForm/Fields")
+        if fa[0] == "xref":
+            fa = ("array", doc.xref_object(int(fa[1].split()[0]), compressed=True))
+        roots = {int(n) for n in re.findall(r"(\d+)\s+\d+\s+R", fa[1])} if fa[0] == "array" else set()
+    except Exception:  # a dangling or non-array /Fields: every widget is then unreachable
+        roots = set()
     toplevel, names, radio_on = {}, {}, {}
     for pg in doc:
         for w in pg.widgets():
             src = doc.xref_object(w.xref, compressed=True)
+            if _field_root(doc, w.xref) not in roots:
+                problems.append(f"{w.field_name or w.xref}: its root field is not in /AcroForm "
+                                f"/Fields — pypdf's field tree cannot see it")
             ap = doc.xref_get_key(w.xref, "AP/N")
             if ap[0] != "null" and "null" in ap[1]:
                 problems.append(f"{w.field_name or '<kid>'}: stale null in /AP/N {ap[1]}")

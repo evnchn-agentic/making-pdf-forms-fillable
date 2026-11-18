@@ -27,6 +27,7 @@ Each one has, in practice, passed a form that the other caught.
 | A filled rect's extent ≠ the visible cell | Field overruns into the next section's header |
 | Fixed size + mixed CJK/Latin overflowing the field width | Text renders *outside* the box, into the row below. A bigger box does not fix it |
 | Checkbox rects sized to the row, not the glyph | Looks fine empty; the selected dot lands on the neighbouring label |
+| Fields listed by widget xref on PyMuPDF 2.x | pypdf reads the filled form back with text and checkbox fields missing |
 
 Every one was burned in practice rather than theorised. The skill is also explicit about what its own verification **cannot** prove: with `NeedAppearances` set, a conforming viewer discards the embedded appearance streams and rebuilds them, so a locally-rendered PNG shows this library's font handling and not the viewer's. For a bilingual form, open it in a real viewer before calling it done.
 
